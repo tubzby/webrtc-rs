@@ -528,16 +528,19 @@ impl RTCDtlsTransport {
             }
         }
 
-        if let Some(conn) = self.conn().await {
-            // dtls_transport connection may be closed on sctp close.
-            match conn.close().await {
-                Ok(_) => {}
-                Err(err) => {
-                    if err.to_string() != dtls::Error::ErrConnClosed.to_string() {
-                        close_errs.push(err.into());
+        {
+            let mut conn = self.conn.lock().await;
+            if let Some(conn) = &*conn {
+                match conn.close().await {
+                    Ok(_) => {}
+                    Err(err) => {
+                        if err.to_string() != dtls::Error::ErrConnClosed.to_string() {
+                            close_errs.push(err.into());
+                        }
                     }
                 }
             }
+            *conn = None;
         }
 
         self.state_change(RTCDtlsTransportState::Closed).await;
