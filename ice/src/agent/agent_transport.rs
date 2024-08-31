@@ -242,6 +242,9 @@ impl Conn for AgentConn {
     }
 
     async fn close(&self) -> std::result::Result<(), util::Error> {
+        let mut checklist = self.checklist.lock().await;
+        checklist.clear();
+        self.selected_pair.swap(None);
         Ok(())
     }
 
