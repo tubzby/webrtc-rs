@@ -34,6 +34,7 @@ pub struct Session {
     close_session_tx: mpsc::Sender<()>,
     pub(crate) udp_tx: Arc<dyn Conn + Send + Sync>,
     is_rtp: bool,
+    rtp_buffer_size: Option<usize>,
 }
 
 impl Session {
@@ -70,6 +71,7 @@ impl Session {
             },
         )?;
 
+        let rtp_buffer_size = config.rtp_buffer_size;
         let streams_map = Arc::new(Mutex::new(HashMap::new()));
         let (mut new_stream_tx, new_stream_rx) = mpsc::channel(8);
         let (close_stream_tx, mut close_stream_rx) = mpsc::channel(8);
@@ -91,6 +93,7 @@ impl Session {
                     &mut new_stream_tx,
                     &mut remote_context,
                     is_rtp,
+                    rtp_buffer_size,
                 );
                 let close_stream = close_stream_rx.recv();
                 let close_session = close_session_rx.recv();
@@ -116,6 +119,7 @@ impl Session {
             close_session_tx,
             udp_tx,
             is_rtp,
+            rtp_buffer_size,
         })
     }
 
@@ -132,49 +136,74 @@ impl Session {
         new_stream_tx: &mut mpsc::Sender<(Arc<Stream>, Option<rtp::header::Header>)>,
         remote_context: &mut Context,
         is_rtp: bool,
+        rtp_buffer_size: Option<usize>,
     ) -> Result<()> {
         let n = udp_rx.recv(buf).await?;
         if n == 0 {
             return Err(Error::SessionEof);
         }
 
-        let decrypted = if is_rtp {
-            remote_context.decrypt_rtp(&buf[0..n])?
-        } else {
-            remote_context.decrypt_rtcp(&buf[0..n])?
-        };
+        if is_rtp {
+            let (decrypted, pending) = remote_context.decrypt_rtp_no_commit(&buf[0..n])?;
 
-        let mut buf = &decrypted[..];
-        let (ssrcs, header) = if is_rtp {
-            let header = rtp::header::Header::unmarshal(&mut buf)?;
-            (vec![header.ssrc], Some(header))
-        } else {
-            let pkts = rtcp::packet::unmarshal(&mut buf)?;
-            (destination_ssrc(&pkts), None)
-        };
+            let mut b = &decrypted[..];
+            let header = rtp::header::Header::unmarshal(&mut b)?;
+            let ssrc = header.ssrc;
 
-        for ssrc in ssrcs {
             let (stream, is_new) =
-                Session::get_or_create_stream(streams_map, close_stream_tx.clone(), is_rtp, ssrc)
+                Session::get_or_create_stream(streams_map, close_stream_tx.clone(), is_rtp, ssrc, rtp_buffer_size)
                     .await;
 
             if is_new {
-                log::trace!(
-                    "srtp session got new {} stream {}",
-                    if is_rtp { "rtp" } else { "rtcp" },
-                    ssrc
-                );
+                log::trace!("srtp session got new rtp stream {}", ssrc);
                 new_stream_tx
-                    .send((Arc::clone(&stream), header.clone()))
+                    .send((Arc::clone(&stream), Some(header)))
                     .await?;
             }
 
             match stream.buffer.write(&decrypted).await {
-                Ok(_) => {}
+                Ok(_) => {
+                    remote_context.commit_srtp_decrypt(&pending);
+                }
                 Err(err) => {
-                    // Silently drop data when the buffer is full.
                     if util::Error::ErrBufferFull != err {
                         return Err(err.into());
+                    }
+                    // Buffer full: intentionally do NOT commit so the replay
+                    // detector will accept a future retransmission of this packet.
+                }
+            }
+        } else {
+            let decrypted = remote_context.decrypt_rtcp(&buf[0..n])?;
+
+            let mut b = &decrypted[..];
+            let pkts = rtcp::packet::unmarshal(&mut b)?;
+            let ssrcs = destination_ssrc(&pkts);
+
+            for ssrc in ssrcs {
+                let (stream, is_new) =
+                    Session::get_or_create_stream(
+                        streams_map,
+                        close_stream_tx.clone(),
+                        is_rtp,
+                        ssrc,
+                        None,
+                    )
+                    .await;
+
+                if is_new {
+                    log::trace!("srtp session got new rtcp stream {}", ssrc);
+                    new_stream_tx
+                        .send((Arc::clone(&stream), None))
+                        .await?;
+                }
+
+                match stream.buffer.write(&decrypted).await {
+                    Ok(_) => {}
+                    Err(err) => {
+                        if util::Error::ErrBufferFull != err {
+                            return Err(err.into());
+                        }
                     }
                 }
             }
@@ -188,13 +217,18 @@ impl Session {
         close_stream_tx: mpsc::Sender<u32>,
         is_rtp: bool,
         ssrc: u32,
+        buffer_size: Option<usize>,
     ) -> (Arc<Stream>, bool) {
         let mut streams = streams_map.lock().await;
 
         if let Some(stream) = streams.get(&ssrc) {
             (Arc::clone(stream), false)
         } else {
-            let stream = Arc::new(Stream::new(ssrc, close_stream_tx, is_rtp));
+            let stream = Arc::new(if let Some(size) = buffer_size {
+                Stream::with_buffer_size(ssrc, close_stream_tx, is_rtp, size)
+            } else {
+                Stream::new(ssrc, close_stream_tx, is_rtp)
+            });
             streams.insert(ssrc, Arc::clone(&stream));
             (stream, true)
         }
@@ -208,6 +242,7 @@ impl Session {
             self.close_stream_tx.clone(),
             self.is_rtp,
             ssrc,
+            self.rtp_buffer_size,
         )
         .await;
 

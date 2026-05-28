@@ -4,12 +4,24 @@ use util::marshal::*;
 use super::*;
 use crate::error::Result;
 
+/// Holds state needed to commit a decrypted RTP packet's replay detector update.
+pub struct SrtpDecryptPending {
+    pub ssrc: u32,
+    pub seq: u16,
+    pub diff: i32,
+}
+
 impl Context {
-    pub fn decrypt_rtp_with_header(
+    /// Decrypt an RTP packet without committing to the replay detector.
+    /// On success returns the decrypted payload and a pending token.
+    /// The caller MUST call `commit_srtp_decrypt` after the packet has been
+    /// successfully delivered downstream; if delivery fails the token can
+    /// simply be dropped, allowing a future retransmission to pass replay check.
+    pub fn decrypt_rtp_no_commit_with_header(
         &mut self,
         encrypted: &[u8],
         header: &rtp::header::Header,
-    ) -> Result<Bytes> {
+    ) -> Result<(Bytes, SrtpDecryptPending)> {
         let auth_tag_len = self.cipher.rtp_auth_tag_len();
         if encrypted.len() < header.marshal_size() + auth_tag_len {
             return Err(Error::ErrTooShortRtp);
@@ -27,14 +39,41 @@ impl Context {
         }
 
         let dst = self.cipher.decrypt_rtp(encrypted, header, roc)?;
-        {
-            let state = self.get_srtp_ssrc_state(header.ssrc);
-            if let Some(replay_detector) = &mut state.replay_detector {
-                replay_detector.accept();
-            }
-            state.update_rollover_count(header.sequence_number, diff);
-        }
 
+        Ok((
+            dst,
+            SrtpDecryptPending {
+                ssrc: header.ssrc,
+                seq: header.sequence_number,
+                diff,
+            },
+        ))
+    }
+
+    /// Decrypt an RTP packet without committing to the replay detector.
+    pub fn decrypt_rtp_no_commit(&mut self, encrypted: &[u8]) -> Result<(Bytes, SrtpDecryptPending)> {
+        let mut buf = encrypted;
+        let header = rtp::header::Header::unmarshal(&mut buf)?;
+        self.decrypt_rtp_no_commit_with_header(encrypted, &header)
+    }
+
+    /// Commit a previously checked decrypt — marks the packet as seen in the
+    /// replay window and updates the rollover counter.
+    pub fn commit_srtp_decrypt(&mut self, pending: &SrtpDecryptPending) {
+        let state = self.get_srtp_ssrc_state(pending.ssrc);
+        if let Some(replay_detector) = &mut state.replay_detector {
+            replay_detector.accept();
+        }
+        state.update_rollover_count(pending.seq, pending.diff);
+    }
+
+    pub fn decrypt_rtp_with_header(
+        &mut self,
+        encrypted: &[u8],
+        header: &rtp::header::Header,
+    ) -> Result<Bytes> {
+        let (dst, pending) = self.decrypt_rtp_no_commit_with_header(encrypted, header)?;
+        self.commit_srtp_decrypt(&pending);
         Ok(dst)
     }
 

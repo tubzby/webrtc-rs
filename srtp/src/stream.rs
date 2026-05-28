@@ -25,7 +25,6 @@ impl Stream {
         Stream {
             ssrc,
             tx,
-            // Create a buffer with a 1MB limit
             buffer: Buffer::new(
                 0,
                 if is_rtp {
@@ -34,6 +33,16 @@ impl Stream {
                     SRTCP_BUFFER_SIZE
                 },
             ),
+            is_rtp,
+        }
+    }
+
+    /// Create a new stream with a custom buffer size in bytes.
+    pub fn with_buffer_size(ssrc: u32, tx: mpsc::Sender<u32>, is_rtp: bool, buffer_size: usize) -> Self {
+        Stream {
+            ssrc,
+            tx,
+            buffer: Buffer::new(0, buffer_size),
             is_rtp,
         }
     }

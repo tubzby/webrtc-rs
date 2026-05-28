@@ -32,6 +32,10 @@ pub struct Config {
 
     pub local_rtcp_options: Option<ContextOption>,
     pub remote_rtcp_options: Option<ContextOption>,
+
+    /// Override the per-SSRC RTP buffer size in bytes.
+    /// When None, uses the default (1MB).
+    pub rtp_buffer_size: Option<usize>,
 }
 
 impl Config {

@@ -40,6 +40,8 @@ async fn build_session_srtp_pair() -> Result<(Session, Session)> {
 
         local_rtcp_options: None,
         remote_rtcp_options: None,
+
+        rtp_buffer_size: None,
     };
 
     let cb = Config {
@@ -66,6 +68,8 @@ async fn build_session_srtp_pair() -> Result<(Session, Session)> {
 
         local_rtcp_options: None,
         remote_rtcp_options: None,
+
+        rtp_buffer_size: None,
     };
 
     let sa = Session::new(Arc::new(ua), ca, true).await?;
