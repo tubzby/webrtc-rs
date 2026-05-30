@@ -164,7 +164,7 @@ impl Session {
             
             match stream.buffer.write(&decrypted).await {
                 Ok(_) => {
-                    { crate::stream::record_accept(ssrc, pending.seq); remote_context.commit_srtp_decrypt(&pending); }
+                    crate::stream::record_accept(ssrc, pending.seq); remote_context.commit_srtp_decrypt(&pending);
                 }
                 Err(err) => {
                     if util::Error::ErrBufferFull != err {
