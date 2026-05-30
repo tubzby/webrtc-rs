@@ -31,7 +31,11 @@ impl Context {
         let state = self.get_srtp_ssrc_state(header.ssrc);
         let (roc, diff, _) = state.next_rollover_count(header.sequence_number);
         if let Some(replay_detector) = &mut state.replay_detector {
+            let seq = header.sequence_number;
+            let latest = state.index as u16;
             if !replay_detector.check(header.sequence_number as u64) {
+                let wrap_diff = seq.wrapping_sub(latest) as i16;
+                eprintln!("SRTP REJECT ssrc={} seq={} latest={} wrap_diff={}", header.ssrc, seq, latest, wrap_diff);
                 return Err(Error::SrtpSsrcDuplicated(
                     header.ssrc,
                     header.sequence_number,
@@ -63,6 +67,8 @@ impl Context {
     pub fn commit_srtp_decrypt(&mut self, pending: &SrtpDecryptPending) {
         let state = self.get_srtp_ssrc_state(pending.ssrc);
         if let Some(replay_detector) = &mut state.replay_detector {
+            let seq = header.sequence_number;
+            let latest = state.index as u16;
             replay_detector.accept();
         }
         state.update_rollover_count(pending.seq, pending.diff);
