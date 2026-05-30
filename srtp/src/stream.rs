@@ -55,6 +55,7 @@ impl Stream {
     }
 
     async fn execute_pending_commit(&self) {
+        eprintln!("SRTP EXEC pending_commits_len={}", self.pending_commits.lock().await.len());
         if let Some(pending) = self.pending_commits.lock().await.pop_front() {
             let ctx_ptr = unsafe { *self.commit_ctx.get() };
             if let Some(ctx) = ctx_ptr {
