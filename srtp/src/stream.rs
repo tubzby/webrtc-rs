@@ -83,7 +83,6 @@ impl Stream {
 
     /// Execute the oldest pending commit, if any.
     async fn execute_pending_commit(&self) {
-        eprintln!("SRTP EXECUTE_PENDING_COMMIT CALLED");
         if let Some(pending) = self.pending_commits.lock().await.pop_front() {
             // SAFETY: The Context outlives the Stream (same task ownership).
             let ctx_ptr = unsafe { *self.commit_ctx.get() };
