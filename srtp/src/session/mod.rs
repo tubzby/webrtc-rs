@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 use crate::option::*;
 use crate::stream::*;
 
-const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 64;
+const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 2048;
 const DEFAULT_SESSION_SRTCP_REPLAY_PROTECTION_WINDOW: usize = 64;
 
 /// Session implements io.ReadWriteCloser and provides a bi-directional SRTP session
@@ -155,6 +155,8 @@ impl Session {
                     .await;
 
             if is_new {
+                // SAFETY: remote_context outlives the spawned task which owns all streams.
+                unsafe { stream.set_commit_ctx(remote_context as *mut Context)};
                 log::trace!("srtp session got new rtp stream {}", ssrc);
                 new_stream_tx
                     .send((Arc::clone(&stream), Some(header)))
@@ -163,7 +165,7 @@ impl Session {
 
             match stream.buffer.write(&decrypted).await {
                 Ok(_) => {
-                    remote_context.commit_srtp_decrypt(&pending);
+                    stream.queue_pending_commit(pending).await;
                 }
                 Err(err) => {
                     if util::Error::ErrBufferFull != err {
@@ -192,6 +194,8 @@ impl Session {
                     .await;
 
                 if is_new {
+                    // SAFETY: remote_context outlives the spawned task which owns all streams.
+                    unsafe { stream.set_commit_ctx(remote_context as *mut Context)};
                     log::trace!("srtp session got new rtcp stream {}", ssrc);
                     new_stream_tx
                         .send((Arc::clone(&stream), None))

@@ -5,6 +5,7 @@ use super::*;
 use crate::error::Result;
 
 /// Holds state needed to commit a decrypted RTP packet's replay detector update.
+#[derive(Debug)]
 pub struct SrtpDecryptPending {
     pub ssrc: u32,
     pub seq: u16,
