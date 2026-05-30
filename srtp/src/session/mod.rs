@@ -155,17 +155,16 @@ impl Session {
                     .await;
 
             if is_new {
-                // SAFETY: remote_context outlives the spawned task which owns all streams.
-                unsafe { stream.set_commit_ctx(remote_context as *mut Context)};
                 log::trace!("srtp session got new rtp stream {}", ssrc);
                 new_stream_tx
                     .send((Arc::clone(&stream), Some(header)))
                     .await?;
             }
 
+            super::record_write_timestamp();
             match stream.buffer.write(&decrypted).await {
                 Ok(_) => {
-                    stream.queue_pending_commit(pending).await;
+                    remote_context.commit_srtp_decrypt(&pending);
                 }
                 Err(err) => {
                     if util::Error::ErrBufferFull != err {
@@ -194,15 +193,14 @@ impl Session {
                     .await;
 
                 if is_new {
-                    // SAFETY: remote_context outlives the spawned task which owns all streams.
-                    unsafe { stream.set_commit_ctx(remote_context as *mut Context)};
                     log::trace!("srtp session got new rtcp stream {}", ssrc);
                     new_stream_tx
                         .send((Arc::clone(&stream), None))
                         .await?;
                 }
 
-                match stream.buffer.write(&decrypted).await {
+                super::record_write_timestamp();
+            match stream.buffer.write(&decrypted).await {
                     Ok(_) => {}
                     Err(err) => {
                         if util::Error::ErrBufferFull != err {

@@ -1,18 +1,23 @@
-use std::cell::UnsafeCell;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, AtomicI64, Ordering};
+use std::time::Instant;
 
 use tokio::sync::{mpsc, Mutex};
 use util::marshal::*;
 use util::Buffer;
 
-use crate::context::srtp::SrtpDecryptPending;
 use crate::error::{Error, Result};
 
-/// Limit the buffer size to 1MB
 pub const SRTP_BUFFER_SIZE: usize = 1000 * 1000;
-
-/// Limit the buffer size to 100KB
 pub const SRTCP_BUFFER_SIZE: usize = 100 * 1000;
+
+/// Diagnostic: track write-read latency per SSRC
+static DIAG_MAX_LATENCY_US: AtomicU64 = AtomicU64::new(0);
+static DIAG_MIN_LATENCY_US: AtomicU64 = AtomicU64::new(u64::MAX);
+static DIAG_TOTAL_LATENCY_US: AtomicU64 = AtomicU64::new(0);
+static DIAG_READ_COUNT: AtomicU64 = AtomicU64::new(0);
+static DIAG_LAST_WRITE_TIMESTAMP_US: AtomicI64 = AtomicI64::new(-1);
+static DIAG_LAST_LOG: AtomicU64 = AtomicU64::new(0);
 
 /// Stream handles decryption for a single RTP/RTCP SSRC
 #[derive(Debug)]
@@ -21,134 +26,90 @@ pub struct Stream {
     tx: mpsc::Sender<u32>,
     pub(crate) buffer: Buffer,
     is_rtp: bool,
-    /// Queue of pending replay commits. Each entry is executed after a
-    /// successful buffer read, ensuring accept() only fires once the
-    /// downstream reader has actually consumed the packet.
-    pending_commits: Mutex<VecDeque<SrtpDecryptPending>>,
-    /// Raw pointer to the Context for executing commits.
-    /// Uses UnsafeCell since *mut T is not Send/Sync.
-    /// Safe because the Context outlives the Stream (both owned by same task).
-    commit_ctx: UnsafeCell<Option<*mut crate::context::Context>>,
 }
 
-// SAFETY: commit_ctx is only accessed from the spawned task that owns
-// both the Context and all Streams. No actual cross-thread sharing occurs.
-unsafe impl Send for Stream {}
-unsafe impl Sync for Stream {}
-
 impl Stream {
-    /// Create a new stream
     pub fn new(ssrc: u32, tx: mpsc::Sender<u32>, is_rtp: bool) -> Self {
         Stream {
-            ssrc,
-            tx,
-            buffer: Buffer::new(
-                0,
-                if is_rtp {
-                    SRTP_BUFFER_SIZE
-                } else {
-                    SRTCP_BUFFER_SIZE
-                },
-            ),
+            ssrc, tx,
+            buffer: Buffer::new(0, if is_rtp { SRTP_BUFFER_SIZE } else { SRTCP_BUFFER_SIZE }),
             is_rtp,
-            pending_commits: Mutex::new(VecDeque::new()),
-            commit_ctx: UnsafeCell::new(None),
         }
     }
 
-    /// Create a new stream with a custom buffer size in bytes.
     pub fn with_buffer_size(ssrc: u32, tx: mpsc::Sender<u32>, is_rtp: bool, buffer_size: usize) -> Self {
-        Stream {
-            ssrc,
-            tx,
-            buffer: Buffer::new(0, buffer_size),
-            is_rtp,
-            pending_commits: Mutex::new(VecDeque::new()),
-            commit_ctx: UnsafeCell::new(None),
-        }
+        Stream { ssrc, tx, buffer: Buffer::new(0, buffer_size), is_rtp }
     }
 
-    /// Set the Context pointer for executing pending commits.
-    /// # Safety
-    /// The Context must outlive this Stream. This is guaranteed when both
-    /// are owned by the same spawned task.
-    pub unsafe fn set_commit_ctx(&self, ctx: *mut crate::context::Context) {
-        *self.commit_ctx.get() = Some(ctx);
-    }
+    pub fn get_ssrc(&self) -> u32 { self.ssrc }
+    pub fn is_rtp_stream(&self) -> bool { self.is_rtp }
 
-    /// Queue a pending replay commit to execute after the next buffer read.
-    pub async fn queue_pending_commit(&self, pending: SrtpDecryptPending) {
-        self.pending_commits.lock().await.push_back(pending);
-    }
-
-    /// Execute the oldest pending commit, if any.
-    async fn execute_pending_commit(&self) {
-        if let Some(pending) = self.pending_commits.lock().await.pop_front() {
-            // SAFETY: The Context outlives the Stream (same task ownership).
-            let ctx_ptr = unsafe { *self.commit_ctx.get() };
-            if let Some(ctx) = ctx_ptr {
-                let ctx = unsafe { &mut *ctx };
-                ctx.commit_srtp_decrypt(&pending);
+    pub async fn read(&self, buf: &mut [u8]) -> Result<usize> {
+        let now_us = Instant::now().elapsed().as_micros() as u64;
+        let last_write = DIAG_LAST_WRITE_TIMESTAMP_US.load(Ordering::Relaxed);
+        if last_write >= 0 {
+            let latency = now_us.saturating_sub(last_write as u64);
+            DIAG_MAX_LATENCY_US.fetch_max(latency, Ordering::Relaxed);
+            DIAG_MIN_LATENCY_US.fetch_min(latency, Ordering::Relaxed);
+            DIAG_TOTAL_LATENCY_US.fetch_add(latency, Ordering::Relaxed);
+            let count = DIAG_READ_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            let last_log = DIAG_LAST_LOG.load(Ordering::Relaxed);
+            if count >= last_log + 500 {
+                if DIAG_LAST_LOG.compare_exchange(last_log, count, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                    let avg = DIAG_TOTAL_LATENCY_US.load(Ordering::Relaxed) / count;
+                    let max = DIAG_MAX_LATENCY_US.load(Ordering::Relaxed);
+                    let min = DIAG_MIN_LATENCY_US.load(Ordering::Relaxed);
+                    eprintln!("SRTP DIAG ssrc={} reads={} min={}us avg={}us max={}us",
+                        self.ssrc, count, min, avg, max);
+                }
             }
         }
-    }
-
-    /// GetSSRC returns the SSRC we are demuxing for
-    pub fn get_ssrc(&self) -> u32 {
-        self.ssrc
-    }
-
-    /// Check if RTP is a stream.
-    pub fn is_rtp_stream(&self) -> bool {
-        self.is_rtp
-    }
-
-    /// Read reads and decrypts full RTP packet from the nextConn
-    pub async fn read(&self, buf: &mut [u8]) -> Result<usize> {
         let n = self.buffer.read(buf, None).await?;
-        self.execute_pending_commit().await;
         Ok(n)
     }
 
-    /// ReadRTP reads and decrypts full RTP packet and its header from the nextConn
     pub async fn read_rtp(&self, buf: &mut [u8]) -> Result<rtp::packet::Packet> {
-        if !self.is_rtp {
-            return Err(Error::InvalidRtpStream);
+        if !self.is_rtp { return Err(Error::InvalidRtpStream); }
+        let now_us = Instant::now().elapsed().as_micros() as u64;
+        let last_write = DIAG_LAST_WRITE_TIMESTAMP_US.load(Ordering::Relaxed);
+        if last_write >= 0 {
+            let latency = now_us.saturating_sub(last_write as u64);
+            DIAG_MAX_LATENCY_US.fetch_max(latency, Ordering::Relaxed);
+            DIAG_MIN_LATENCY_US.fetch_min(latency, Ordering::Relaxed);
+            DIAG_TOTAL_LATENCY_US.fetch_add(latency, Ordering::Relaxed);
+            let count = DIAG_READ_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            let last_log = DIAG_LAST_LOG.load(Ordering::Relaxed);
+            if count >= last_log + 500 {
+                if DIAG_LAST_LOG.compare_exchange(last_log, count, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                    let avg = DIAG_TOTAL_LATENCY_US.load(Ordering::Relaxed) / count;
+                    let max = DIAG_MAX_LATENCY_US.load(Ordering::Relaxed);
+                    let min = DIAG_MIN_LATENCY_US.load(Ordering::Relaxed);
+                    eprintln!("SRTP DIAG ssrc={} reads={} min={}us avg={}us max={}us",
+                        self.ssrc, count, min, avg, max);
+                }
+            }
         }
-
         let n = self.buffer.read(buf, None).await?;
         let mut b = &buf[..n];
-        let pkt = rtp::packet::Packet::unmarshal(&mut b)?;
-
-        // Execute pending commit now that the packet has been consumed.
-        self.execute_pending_commit().await;
-
-        Ok(pkt)
+        Ok(rtp::packet::Packet::unmarshal(&mut b)?)
     }
 
-    /// read_rtcp reads and decrypts full RTP packet and its header from the nextConn
-    pub async fn read_rtcp(
-        &self,
-        buf: &mut [u8],
-    ) -> Result<Vec<Box<dyn rtcp::packet::Packet + Send + Sync>>> {
-        if self.is_rtp {
-            return Err(Error::InvalidRtcpStream);
-        }
-
+    pub async fn read_rtcp(&self, buf: &mut [u8]) -> Result<Vec<Box<dyn rtcp::packet::Packet + Send + Sync>>> {
+        if self.is_rtp { return Err(Error::InvalidRtcpStream); }
         let n = self.buffer.read(buf, None).await?;
         let mut b = &buf[..n];
-        let pkt = rtcp::packet::unmarshal(&mut b)?;
-
-        // Execute pending commit.
-        self.execute_pending_commit().await;
-
-        Ok(pkt)
+        Ok(rtcp::packet::unmarshal(&mut b)?)
     }
 
-    /// Close removes the ReadStream from the session and cleans up any associated state
     pub async fn close(&self) -> Result<()> {
         self.buffer.close().await;
         let _ = self.tx.send(self.ssrc).await;
         Ok(())
     }
+}
+
+/// Called by session after buffer.write() to record the timestamp
+pub fn record_write_timestamp() {
+    let now_us = Instant::now().elapsed().as_micros() as i64;
+    DIAG_LAST_WRITE_TIMESTAMP_US.store(now_us, Ordering::Relaxed);
 }
