@@ -55,13 +55,13 @@ impl Session {
             &config.keys.remote_master_salt,
             config.profile,
             if config.remote_rtp_options.is_none() {
-                srtp_no_replay_protection()
+                Some(srtp_no_replay_protection())
             log::info!("SRTP replay protection DISABLED by default");
             } else {
                 config.remote_rtp_options
             },
             if config.remote_rtcp_options.is_none() {
-                srtcp_no_replay_protection()
+                Some(srtcp_no_replay_protection())
             } else {
                 config.remote_rtcp_options
             },
