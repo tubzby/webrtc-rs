@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 use crate::option::*;
 use crate::stream::*;
 
-const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 64;
+const DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW: usize = 1024;
 const DEFAULT_SESSION_SRTCP_REPLAY_PROTECTION_WINDOW: usize = 64;
 
 /// Session implements io.ReadWriteCloser and provides a bi-directional SRTP session
