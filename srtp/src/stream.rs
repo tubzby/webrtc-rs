@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use tokio::sync::{mpsc, Mutex};
 use util::marshal::*;
@@ -18,10 +18,10 @@ pub struct Stream {
     is_rtp: bool,
     pending_commits: Mutex<VecDeque<SrtpDecryptPending>>,
     commit_ctx: std::cell::UnsafeCell<Option<*mut crate::context::Context>>,
-    committed_seqs: Mutex<HashSet<u16>>,
 }
 
-use std::collections::VecDeque;
+// SAFETY: commit_ctx is only accessed from the spawned task that owns
+// both the Context and all Streams. No actual cross-thread access.
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
 
@@ -33,7 +33,6 @@ impl Stream {
             is_rtp,
             pending_commits: Mutex::new(VecDeque::new()),
             commit_ctx: std::cell::UnsafeCell::new(None),
-            committed_seqs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -44,7 +43,6 @@ impl Stream {
             is_rtp,
             pending_commits: Mutex::new(VecDeque::new()),
             commit_ctx: std::cell::UnsafeCell::new(None),
-            committed_seqs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -53,16 +51,11 @@ impl Stream {
     }
 
     pub async fn queue_pending_commit(&self, pending: SrtpDecryptPending) {
-        let mut committed = self.committed_seqs.lock().await;
-        if committed.contains(&pending.seq) {
-            return; // Already committed, drop this retransmission
-        }
-        committed.insert(pending.seq);
-        drop(committed);
         self.pending_commits.lock().await.push_back(pending);
     }
 
     async fn execute_pending_commit(&self) {
+        eprintln!("SRTP EXEC pending_commits_len={}", self.pending_commits.lock().await.len());
         if let Some(pending) = self.pending_commits.lock().await.pop_front() {
             let ctx_ptr = unsafe { *self.commit_ctx.get() };
             if let Some(ctx) = ctx_ptr {
