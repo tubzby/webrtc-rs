@@ -161,7 +161,7 @@ impl Session {
                     .await?;
             }
 
-            super::record_write_timestamp();
+            crate::stream::record_write_timestamp();
             match stream.buffer.write(&decrypted).await {
                 Ok(_) => {
                     remote_context.commit_srtp_decrypt(&pending);
@@ -199,7 +199,7 @@ impl Session {
                         .await?;
                 }
 
-                super::record_write_timestamp();
+                crate::stream::record_write_timestamp();
             match stream.buffer.write(&decrypted).await {
                     Ok(_) => {}
                     Err(err) => {
