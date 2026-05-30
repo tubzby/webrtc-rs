@@ -56,6 +56,7 @@ impl Session {
             config.profile,
             if config.remote_rtp_options.is_none() {
                 srtp_no_replay_protection()
+            log::info!("SRTP replay protection DISABLED by default");
             } else {
                 config.remote_rtp_options
             },
