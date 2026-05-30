@@ -161,10 +161,10 @@ impl Session {
                     .await?;
             }
 
-            crate::stream::record_write_timestamp();
+            
             match stream.buffer.write(&decrypted).await {
                 Ok(_) => {
-                    remote_context.commit_srtp_decrypt(&pending);
+                    { crate::stream::record_accept(ssrc, pending.seq); remote_context.commit_srtp_decrypt(&pending); }
                 }
                 Err(err) => {
                     if util::Error::ErrBufferFull != err {
@@ -199,7 +199,7 @@ impl Session {
                         .await?;
                 }
 
-                crate::stream::record_write_timestamp();
+                
             match stream.buffer.write(&decrypted).await {
                     Ok(_) => {}
                     Err(err) => {
