@@ -155,7 +155,6 @@ impl Session {
                     .await;
 
             if is_new {
-                unsafe { stream.set_commit_ctx(remote_context as *mut Context); }
                 log::trace!("srtp session got new rtp stream {}", ssrc);
                 new_stream_tx
                     .send((Arc::clone(&stream), Some(header)))
@@ -165,7 +164,7 @@ impl Session {
             
             match stream.buffer.write(&decrypted).await {
                 Ok(_) => {
-                    stream.queue_pending_commit(pending).await;
+                    crate::stream::record_accept(ssrc, pending.seq); remote_context.commit_srtp_decrypt(&pending);
                 }
                 Err(err) => {
                     if util::Error::ErrBufferFull != err {
@@ -194,7 +193,6 @@ impl Session {
                     .await;
 
                 if is_new {
-                unsafe { stream.set_commit_ctx(remote_context as *mut Context); }
                     log::trace!("srtp session got new rtcp stream {}", ssrc);
                     new_stream_tx
                         .send((Arc::clone(&stream), None))
