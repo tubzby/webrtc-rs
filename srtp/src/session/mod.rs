@@ -55,16 +55,12 @@ impl Session {
             &config.keys.remote_master_salt,
             config.profile,
             if config.remote_rtp_options.is_none() {
-                Some(srtp_replay_protection(
-                    DEFAULT_SESSION_SRTP_REPLAY_PROTECTION_WINDOW,
-                ))
+                srtp_no_replay_protection()
             } else {
                 config.remote_rtp_options
             },
             if config.remote_rtcp_options.is_none() {
-                Some(srtcp_replay_protection(
-                    DEFAULT_SESSION_SRTCP_REPLAY_PROTECTION_WINDOW,
-                ))
+                srtcp_no_replay_protection()
             } else {
                 config.remote_rtcp_options
             },
